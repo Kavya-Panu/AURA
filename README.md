@@ -1,110 +1,237 @@
-# AURA Core — Software Foundation
+# AURA — AI Companion Study Robot
 
-The architectural skeleton of the AURA companion robot. **No voice, AI,
-vision or behaviors live here** — this layer exists so those modules can be
-added later without ever touching each other. Think ROS, not chatbot.
+AURA is a desk companion robot that helps a student focus, learn, and stay
+company. It can see the person in front of it, hear and understand them, reason
+with a large language model, remember what matters, speak with an expressive
+voice, and show emotion on an animated face — all driven by a modular Python
+"brain" on a laptop that talks to an ESP32-based physical robot over serial.
 
-Verified: `python -m unittest discover -s tests` → **28/28 passing**, and
-`main.py` boots BOOTING → IDLE with a demo heartbeat module.
+This repository is the complete software stack: **twelve cooperating layers, 235
+Python files, ~21,800 lines, and 595 passing unit tests.** Every layer runs on a
+plain laptop with **no hardware attached**, because every external dependency
+(camera, microphone, LLM APIs, TTS engines, audio output, and the serial link
+itself) sits behind an interface with a mock implementation.
 
 ---
 
-## Architecture
+## What AURA does
+
+A single spoken question flows through the whole system:
 
 ```
-                        ┌─────────────────────────────┐
-                        │          main.py            │  composition root:
-                        │  builds & injects everything │  the ONLY wiring point
-                        └──────────────┬──────────────┘
-                                       │
-     ┌──────────────┬──────────────────┼──────────────────┬─────────────┐
-     ▼              ▼                  ▼                  ▼             ▼
-┌─────────┐  ┌────────────┐   ┌───────────────┐   ┌───────────┐  ┌─────────┐
-│ config  │  │   logger   │   │   EventBus    │   │ State     │  │ Lifecycle│
-│ (data-  │  │ console +  │   │  pub / sub    │◄──┤ Machine   │  │ Manager │
-│ classes)│  │ rot. file  │   │  priorities   │   │ validated │  │ start / │
-└─────────┘  └────────────┘   │  thread-safe  │   │ + history │  │ health /│
-                              └───────▲───────┘   └───────────┘  │ shutdown│
-                                      │                          └────┬────┘
-                 ═════════ all future modules plug in here ═══════════╪═════
-                                      │                               │
-              ┌────────┬──────────┬───┴────┬──────────┬───────────────┘
-              ▼        ▼          ▼        ▼          ▼
-          FaceLink   Vision     Voice    Brain     Behaviors      (LATER)
-          (ESP32)   (camera)  (mic/tts)  (LLM)   (focus mode...)
+you speak ─► Voice (wake word + STT) ─► Intent (what you meant)
+          ─► Brain (LLM answer / translation)  ◄──► Memory (recall + store)
+          ─► Speech (voice + emotion + mouth) ─► Hardware (HAL) ─► ESP32 face
+Vision watches throughout (face, gaze, phone, gestures, fatigue) and feeds the bus.
 ```
 
-**The rule that keeps this clean:** modules never import or call each other.
-Vision publishes `PHONE_DETECTED`; whoever cares (behaviors, emotions,
-logger) subscribes. Adding a module never means editing another one.
+Everything is wired together by a central **Event Bus** — modules never call each
+other directly. They publish and subscribe to events, which keeps the whole
+system decoupled, testable, and easy to extend.
 
-## Folder guide
+---
 
-| Path | What it is |
-|---|---|
-| `main.py` | Composition root. Builds config → logger → bus → FSM → lifecycle, registers modules, runs. |
-| `core/event_bus.py` | Thread-safe pub/sub. Subscriber priorities, wildcard subscription, sync `publish()` + async `publish_async()` with a priority-queue dispatcher thread. Handler exceptions are logged, never fatal. |
-| `core/state_machine.py` | Validated FSM (illegal transitions raise `StateTransitionError`), entry/exit callbacks, bounded history, publishes `STATE_CHANGED`. Ships with the AURA transition map (BOOTING…SHUTDOWN, incl. FOCUS↔LISTENING for mid-session questions). |
-| `core/logger.py` | `configure_logging()` once; `get_logger("vision")` everywhere. Console + rotating file, per-module names, runtime `set_debug()`. |
-| `core/config.py` | All tunables as dataclasses (`serial`, `camera`, `audio`, `focus`, `ai`, `emotion`, `logging`). JSON overlay via `AuraConfig.from_file`, strict validation, unknown keys rejected. |
-| `core/constants.py` | Every enum: `RobotState`, `RobotEvent`, `Emotion` (values = ESP32 serial tokens!), `FaceCommand`, `HardwareType`, `VERSION`. |
-| `core/timer.py` | Pausable one-shot/repeating timers on daemon threads: `pause/resume/cancel`, `elapsed()/remaining()`, monotonic-clock based. |
-| `core/exceptions.py` | `AuraError` base + Configuration/Hardware/Vision/Voice/AI/Communication/StateTransition/Lifecycle errors, all with structured context. |
-| `core/lifecycle.py` | `Module` protocol (`initialize/start/stop/health_check`) + `LifecycleManager`: init all → start all → IDLE; stop in reverse on shutdown; health reports on the bus. Context-manager friendly. |
-| `tests/` | 28 unit tests covering bus, FSM, timer, logger. |
+## Architecture at a glance
 
-## Writing a future module (the contract)
+Three physical tiers:
 
-```python
-from core.constants import RobotEvent, Emotion
-from core.event_bus import Event, EventBus
-from core.logger import get_logger
+1. **ESP32 Face Engine** (C++/PlatformIO) — renders animated eyes, mouth, and 17
+   emotions on an ILI9341 display, and parses emotion/mouth tokens from serial.
+2. **Laptop "brain"** (this repo, Python) — all perception, reasoning, memory,
+   and expression logic.
+3. **Physical hardware** — display, neck servo, LEDs, propeller, battery,
+   camera, microphone — reached only through the Hardware Abstraction Layer.
 
-log = get_logger("face_link")
+Cross-cutting design rules that hold across every layer:
 
-class FaceLinkModule:                      # satisfies core.lifecycle.Module
-    name = "face_link"
+- **Event Bus only.** Modules communicate through the core `EventBus`; they never
+  import one another or mutate each other's state.
+- **Dependency injection at every boundary.** Cameras, models, LLM providers, TTS
+  engines, audio sinks, storage backends, and the serial transport are all
+  injected behind `Protocol` interfaces, each with a real (lazy-import) backend
+  and a fake/mock backend. That's why the full robot runs offline on a laptop.
+- **Lifecycle-managed modules.** Each manager implements a `Module` protocol
+  (`initialize/start/stop/health_check`) owned by the `LifecycleManager`.
+- **Additive core.** Shared enums (events, emotions) are only ever *appended* to
+  in `core/constants.py`; no existing module is modified when a new layer lands.
+- **Open/Closed extensibility.** New detectors, providers, memory types, devices,
+  and drivers are added by registration, without editing the managers that use
+  them.
 
-    def __init__(self, bus: EventBus, cfg):        # dependencies INJECTED
-        self._bus, self._cfg = bus, cfg
+---
 
-    def initialize(self):                  # open the serial port here
-        self._bus.subscribe(RobotEvent.EMOTION_CHANGED, self._on_emotion)
+## The twelve layers
 
-    def start(self): ...
-    def stop(self): ...
-    def health_check(self) -> bool: return True
+| Layer | Package | Responsibility | Tests |
+|---|---|---|---:|
+| Core Framework | `core/` | Event bus, state machine, lifecycle, config, logging, constants | 28 |
+| Behavior Manager | `behavior/` | Priority-based behavior arbitration; requests emotions | 16 |
+| Mode Manager | `mode/` | 12 operating modes (Focus, Teacher, Quiz, Translation, …) | 27 |
+| Intent Engine | `intent/` | Deterministic NLU — 86 intents, sub-50 ms | 55 |
+| Voice System | `voice/` | Mic → VAD → wake word → speech-to-text | 28 |
+| Vision System | `vision/` | Camera → detectors → interaction (face, gaze, phone, gestures, fatigue) + pipeline | 138 |
+| Brain Manager | `brain/` | Multi-provider LLM answers, translation, conversation, teaching | 51 |
+| Speech Manager | `speech/` | TTS + voice profiles + face emotion + mouth animation | 63 |
+| Memory Manager | `memory/` | Store / search / summarize / forget; retention + working memory | 93 |
+| Hardware (HAL) | `hardware/` | The single hardware boundary + drivers (face, servo, LED, propeller, battery) | 96 |
+| ESP32 Face Engine | `../companion_face/` | On-device animated face (C++/PlatformIO) | — |
+| Command Spec | `../AURA_COMMAND_SPEC.md` | The end-to-end serial/command reference | — |
 
-    def _on_emotion(self, event: Event):
-        emotion = Emotion[event.data["emotion"]]
-        # serial.write(f"{emotion.value}\n")   # token matches the ESP32 engine
-```
+**Total: 595 passing tests.**
 
-Register it in `main.py`: `lifecycle.register(FaceLinkModule(bus, config.serial))`.
-That is the *only* line that changes.
+### Core Framework (`core/`)
+The foundation every other layer builds on: a thread-safe `EventBus`
+(`emit`/`subscribe`/`subscribe_all`), a state machine, a `LifecycleManager` that
+owns all modules, structured logging, config, timers, and the shared
+`RobotEvent` / `Emotion` enums. The `Emotion` values *are* the ESP32 serial
+tokens (17 emotions incl. `THINK`, `LISTEN`, `CELEBRATE`, `WORRIED`).
 
-## Best practices baked in
+### Behavior, Mode & Intent
+**Behavior** arbitrates competing behaviors by priority (preempt / queue / resume)
+and requests emotions via `EMOTION_CHANGED`. **Mode** manages 12 operating modes
+with NORMAL as the hub. **Intent** is a deterministic NLU engine (no LLM) mapping
+utterances to 86 intents in under 50 ms and emitting `QUESTION_RECEIVED`.
 
-1. **Dependency injection** — modules receive the bus/config; nothing reaches
-   for globals. Trivial to unit-test with fakes.
-2. **Fail fast, degrade gracefully** — bad config and illegal transitions
-   raise immediately; runtime handler/callback errors are contained + logged.
-3. **No magic numbers** — if you're typing a literal outside `config.py` or
-   `constants.py`, stop.
-4. **Thread safety by default** — bus, FSM and timers all lock internally;
-   future camera/mic threads can publish from anywhere.
-5. **Reverse-order shutdown** — dependencies come up first, go down last.
+### Voice System (`voice/`)
+Microphone → voice-activity detection → wake-word → Whisper STT, all behind
+`Mic`/`STT` protocols with fake backends. Publishes `TEXT_RECOGNIZED`,
+`WAKE_WORD_DETECTED`, and related events.
 
-## Running
+### Vision System (`vision/`)
+The largest layer, built in stages: a camera layer (thread-safe frame buffer with
+drop-oldest), independent detectors (face, face-tracking, person, phone-with-
+duration), interaction detectors (gestures, smile, eye-contact, head-pose,
+fatigue), a runtime-configurable `VisionPipeline`, and a `PerformanceMonitor`.
+Every model (MediaPipe / YOLO) is injected; the whole thing runs with fakes. It
+only *observes* and publishes events — it never controls behavior.
+
+### Brain Manager (`brain/`)
+AURA's intelligence. Five LLM providers (OpenAI, Claude, Qwen, DeepSeek, Ollama)
+behind one `AIProvider` interface, plus a deterministic `MockProvider`.
+Configurable provider selection (local for simple/offline, cloud for reasoning),
+conversation history, per-mode prompts, translation, and knowledge/teaching —
+with timeout, retry, provider fallback, and caching. Subscribes to
+`QUESTION_RECEIVED`, answers with `ANSWER_READY`. It generates text only.
+
+### Speech Manager (`speech/`)
+Turns Brain answers into expressive, spoken output: chooses a voice profile and
+face emotion, holds a stable expression, animates the mouth (visemes), synthesizes
+via a pluggable TTS engine (pyttsx3 / Edge / Piper + fake), and plays audio on a
+background worker. Subscribes to `ANSWER_READY`; drives the face via
+`EMOTION_CHANGED`.
+
+### Memory Manager (`memory/`)
+Long-term memory behind a storage-provider interface (in-memory / JSON / SQLite,
+with a vector-DB stub for future semantic search). Stores 11 memory types, searches
+by keyword/tag/type/time/importance, summarizes old memories (via an injected
+summarizer — never an LLM call inside memory), and forgets by a configurable
+retention policy with background cleanup. Includes a retention decision service
+and a runtime working-memory context.
+
+### Hardware Abstraction Layer (`hardware/`)
+The **only** module allowed to touch physical hardware. Stage 1 owns the ESP32
+serial link (auto-detect, priority queue, reader/writer threads, auto-reconnect,
+heartbeat) and a device registry; it forwards `EMOTION_CHANGED` to the physical
+face. Stage 2 adds concrete drivers (face, servo, LED, propeller, battery) and a
+command router — all routing *through* the HardwareManager, never the port
+directly (a test enforces that no other module imports `serial`).
+
+---
+
+## Running it
+
+Everything runs offline with mock backends — no hardware, no API keys, no network.
 
 ```bash
-python main.py                       # boot with the demo heartbeat
-python -m unittest discover -s tests # run the test suite
+# from the AURA/ directory
+python -m unittest discover -s tests            # core
+python -m unittest discover -s vision/tests     # any layer
+# ...or the whole suite:
+for d in tests behavior/tests mode/tests intent/tests voice/tests \
+         vision/tests brain/tests speech/tests memory/tests hardware/tests; do
+  python -m unittest discover -s "$d"
+done
 ```
 
-## Status / next steps
+### Going live on a laptop + robot
 
-Foundation only, by design. Next modules to port onto it: `face_link`
-(ESP32 serial), then `vision`, `voice`, `brain`, and the focus-mode behavior
-— each as a `Module` publishing/subscribing on the bus. Targets laptop now,
-Jetson Nano later; nothing here is platform-specific.
+Each layer swaps its mock for a real backend by injection — no code changes
+elsewhere:
+
+```bash
+pip install openai anthropic ollama     # LLM providers you want (Brain)
+pip install openai-whisper sounddevice  # real STT + mic (Voice)
+pip install mediapipe ultralytics opencv-python  # real detectors (Vision)
+pip install pyttsx3 edge-tts simpleaudio         # real TTS + audio (Speech)
+pip install pyserial                    # real ESP32 link (Hardware)
+```
+
+Then construct each manager with its real backend (e.g.
+`HardwareManager(bus, cfg, PySerialTransport())`, `BrainManager` with real
+providers registered) and register them all with the `LifecycleManager`.
+
+---
+
+## Design principles (why it's built this way)
+
+- **Testability first.** Every hardware/model/network dependency is injected, so
+  595 tests run in seconds with no external anything. Threaded code is tested with
+  `wait_until` polling and injectable clocks, not fixed sleeps — so the suite is
+  flake-free (each threaded suite verified 10–15× consecutively).
+- **Separation of concerns.** Vision only observes. Brain only generates text.
+  Speech only expresses. Memory only remembers. Hardware is the only thing that
+  touches a port. No layer reaches across these lines.
+- **The Event Bus is the spine.** A recognized → intent-classified → brain-
+  answered → spoken → physically-expressed interaction happens with zero direct
+  calls between those layers.
+- **Honest status.** Logic verified with fakes is proven; real hardware/model
+  paths are exercised only when you inject real backends on the laptop. Each
+  package README says exactly what is and isn't verified.
+
+---
+
+## Repository layout
+
+```
+AURA/
+├── core/          # event bus, state machine, lifecycle, constants
+├── behavior/      # priority behavior arbitration
+├── mode/          # 12 operating modes
+├── intent/        # deterministic NLU (86 intents)
+├── voice/         # mic -> VAD -> wake word -> STT
+├── vision/        # camera -> detectors -> interaction + pipeline
+├── brain/         # multi-provider LLM, translation, teaching
+├── speech/        # TTS + emotion + mouth animation
+├── memory/        # store/search/summarize/forget + retention + context
+├── hardware/      # HAL: serial link + drivers (the only hardware boundary)
+└── <package>/tests/   # comprehensive unit tests per layer
+
+companion_face/    # ESP32 face engine (C++/PlatformIO)
+AURA_COMMAND_SPEC.md   # end-to-end command/serial reference
+```
+
+Each package has its own README with architecture details, usage, and an honest
+verified-vs-untested status section.
+
+---
+
+## Status & what's next
+
+The software stack is complete end-to-end: AURA can perceive, understand, reason,
+remember, speak, and physically express — every decision reaching the ESP32 face
+over serial. All 595 tests pass and the suite is flake-free.
+
+Natural next steps:
+- **Focus Manager** — the signature feature: a focus timer with phone-warning
+  escalation (using the vision `PHONE_DETECTED` / `PHONE_DURATION_UPDATED`
+  events), driving the face and LEDs through the HAL and logging session stats to
+  Memory. It ties vision, hardware, and memory together.
+- **ESP32 firmware handlers** for the new `SERVO:` / `LED:` / `PROP:` tokens (the
+  emotion and `MOUTH:` tokens already match the Face Engine).
+- **Real-backend bring-up** on the laptop + robot, one layer at a time.
+
+---
+
+*AURA is an MSc dissertation project — a full-stack AI companion robot spanning
+embedded firmware, computer vision, speech, LLM reasoning, memory, and hardware
+control, built as twelve decoupled, individually-tested layers.*
