@@ -57,8 +57,8 @@ class FocusConfig:
 
 @dataclass
 class AIConfig:
-    provider: str = "anthropic"          # anthropic | openai | ollama
-    model: str = "claude-sonnet-4-6"
+    provider: str = "ollama"          # anthropic | openai | ollama
+    model: str = "qwen3.5:4b"
     max_tokens: int = 300
     answer_style: str = "short"          # short, clear answers by default
 

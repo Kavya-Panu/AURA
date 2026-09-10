@@ -54,7 +54,7 @@ class FakeAudioSink:
 
 
 class RealAudioSink:
-    """Real playback via simpleaudio/sounddevice (lazily imported)."""
+    """Real WAV playback via soundfile + sounddevice (lazily imported)."""
 
     def __init__(self) -> None:
         self.volume = 1.0
@@ -64,21 +64,127 @@ class RealAudioSink:
 
     def play(self, audio: object, duration_s: float,
              should_stop: Callable[[], bool]) -> bool:
+        del duration_s  # playback duration comes from the generated WAV file
+
         try:
-            import simpleaudio as sa
+            import sounddevice as sd
+            import soundfile as sf
         except Exception as exc:                        # noqa: BLE001
             raise PlaybackError(f"audio backend unavailable: {exc}") from exc
+
+        path = str(audio)
         try:
-            wave_obj = sa.WaveObject.from_wave_file(str(audio))
-            play_obj = wave_obj.play()
-            while play_obj.is_playing():
+            samples, sample_rate = sf.read(path, dtype="float32")
+            if self.volume != 1.0:
+                samples = samples * self.volume
+
+            sd.play(samples, sample_rate, blocking=False)
+
+            while True:
+                stream = sd.get_stream()
+                if not bool(getattr(stream, "active", False)):
+                    return True
                 if should_stop():
-                    play_obj.stop()
+                    sd.stop()
                     return False
                 time.sleep(0.02)
-            return True
+
         except Exception as exc:                        # noqa: BLE001
             raise PlaybackError(f"playback failed: {exc}") from exc
+        finally:
+            # pyttsx3 produces a temporary WAV for each answer.
+            try:
+                from pathlib import Path
+                temp_path = Path(path)
+                if temp_path.exists() and temp_path.suffix.lower() == ".wav":
+                    temp_path.unlink(missing_ok=True)
+            except Exception:                           # noqa: BLE001
+                pass
+
+
+class Esp32AudioSink:
+    """WAV playback through the robot's ES8311 speaker over USB serial."""
+
+    def __init__(self, audio_link, sample_rate: int = 16_000) -> None:
+        self._link = audio_link
+        self._sample_rate = sample_rate
+        self.volume = 1.0
+
+    def set_volume(self, volume: float) -> None:
+        self.volume = max(0.0, min(1.0, volume))
+        self._link.set_volume(round(self.volume * 100))
+
+    def play(self, audio: object, duration_s: float,
+             should_stop: Callable[[], bool]) -> bool:
+        del duration_s
+        path = str(audio)
+        try:
+            import numpy as np
+            import soundfile as sf
+
+            samples, source_rate = sf.read(path, dtype="float32", always_2d=True)
+            mono = samples.mean(axis=1)
+            if source_rate != self._sample_rate and len(mono) > 1:
+                target_count = max(
+                    1,
+                    round(len(mono) * self._sample_rate / source_rate),
+                )
+                source_x = np.linspace(0.0, 1.0, len(mono), endpoint=False)
+                target_x = np.linspace(0.0, 1.0, target_count, endpoint=False)
+                mono = np.interp(target_x, source_x, mono)
+
+            # The tiny robot speaker needs a denser signal than desktop
+            # speakers, but hard limiting overloads its small amplifier and
+            # sounds like a burst/crackle. Use moderate speech compression with
+            # generous electrical headroom; the ES8311 controls final volume.
+            mono = np.nan_to_num(mono, copy=False)
+            if len(mono):
+                mono = mono - float(np.mean(mono))
+                rms = float(np.sqrt(np.mean(np.square(mono))))
+                if rms > 1.0e-5:
+                    drive = float(np.clip(0.13 / rms, 1.0, 3.0))
+                    mono = np.tanh(mono * drive)
+                    peak = float(np.max(np.abs(mono)))
+                    if peak > 1.0e-5:
+                        mono = mono * (0.60 / peak)
+            mono = np.clip(mono, -0.60, 0.60)
+
+            # Give the ES8311 DAC/amp 120 ms to settle after switching from the
+            # microphone, then play a brief two-note acknowledgement before
+            # every answer. This is both a friendly Siri-like cue and an
+            # unmistakable check that the robot speaker path is active.
+            settle = np.zeros(round(self._sample_rate * 0.12), dtype=np.float32)
+            note_len = round(self._sample_rate * 0.075)
+            gap = np.zeros(round(self._sample_rate * 0.025), dtype=np.float32)
+            tail = np.zeros(round(self._sample_rate * 0.06), dtype=np.float32)
+            t = np.arange(note_len, dtype=np.float32) / self._sample_rate
+            envelope = np.sin(np.linspace(0.0, np.pi, note_len, dtype=np.float32))
+            note_one = 0.18 * np.sin(2.0 * np.pi * 784.0 * t) * envelope
+            note_two = 0.18 * np.sin(2.0 * np.pi * 1046.5 * t) * envelope
+            mono = np.concatenate(
+                (settle, note_one, gap, note_two, tail, mono.astype(np.float32)),
+            )
+
+            final_rms = float(np.sqrt(np.mean(np.square(mono)))) if len(mono) else 0.0
+            final_peak = float(np.max(np.abs(mono))) if len(mono) else 0.0
+            log.info(
+                "ESP32 speech prepared: %.2fs, RMS %.3f, peak %.3f",
+                len(mono) / self._sample_rate,
+                final_rms,
+                final_peak,
+            )
+            pcm = (mono * 32767.0).astype("<i2", copy=False).tobytes()
+            return bool(self._link.play_pcm(pcm, should_stop))
+        except Exception as exc:  # noqa: BLE001
+            raise PlaybackError(f"ESP32 speaker playback failed: {exc}") from exc
+        finally:
+            try:
+                from pathlib import Path
+                temp_path = Path(path)
+                if temp_path.exists() and temp_path.suffix.lower() == ".wav":
+                    temp_path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class AudioPlayer:

@@ -31,20 +31,42 @@ class WakeWordConfig:
 
 @dataclass
 class VADConfig:
-    aggressiveness: int = 2               # 0..3 (webrtcvad style)
+    aggressiveness: int = 1               # 0..3; lower is friendlier to soft voices
     start_frames: int = 3                 # consecutive speech frames to start
-    silence_timeout_s: float = 0.8        # trailing silence that ends speech
-    max_utterance_s: float = 15.0         # hard cap to avoid endless recordings
-    pre_roll_ms: int = 300                # audio kept before speech onset
+    silence_timeout_s: float = 1.25       # normal end-of-speech pause
+    short_silence_timeout_s: float = 1.80 # extra patience for short phrases
+    long_silence_timeout_s: float = 1.55  # breathing/thinking pause in long speech
+    short_utterance_s: float = 1.5
+    long_utterance_s: float = 4.0
+    max_utterance_s: float = 30.0         # hard cap to avoid endless recordings
+    pre_roll_ms: int = 500                # preserve the beginning of soft speech
+    calibration_s: float = 1.0            # initial room-noise calibration
+    wait_for_speech_s: float = 20.0
+    min_speech_s: float = 0.25            # reject clicks and accidental noises
+    noise_multiplier: float = 2.2
+    noise_margin: float = 0.004
 
 
 @dataclass
 class STTConfig:
-    model_size: str = "base"              # tiny|base|small|medium|large
-    device: str = "auto"                  # auto -> cuda if available else cpu
+    model_size: str = "distil-medium.en"  # stronger English/accent recognition
+    device: str = "cpu"                  # auto -> cuda if available else cpu
     compute_type: str = "int8"            # cpu-friendly default
-    beam_size: int = 1
-    language: str | None = None           # None -> auto-detect
+    beam_size: int = 5
+    best_of: int = 5
+    patience: float = 1.2
+    repetition_penalty: float = 1.08
+    no_repeat_ngram_size: int = 3
+    language: str | None = "en"
+    min_confidence: float = 0.30
+    hotwords: str | None = (
+        "AURA ESP32 ESP32-S3 Arduino Jetson Nano OpenCV MediaPipe Whisper "
+        "Qwen Ollama PlatformIO ILI9341 ES8311 embedded systems electronics "
+        "computer vision robotics"
+    )
+    # Keep this empty. Whisper can repeat an initial prompt as a hallucinated
+    # transcript when the microphone contains only room noise.
+    initial_prompt: str | None = None
 
 
 @dataclass
@@ -52,6 +74,10 @@ class NoiseConfig:
     enabled: bool = True
     sensitivity: float = 0.5              # 0..1; higher removes more noise
     high_pass_hz: int = 80                # remove low fan/hum rumble
+    auto_gain: bool = True                # lift quiet onboard-microphone speech
+    target_rms: float = 0.09              # healthy level for Whisper
+    max_gain: float = 8.0                 # avoid amplifying noise without limit
+    peak_limit: float = 0.92              # prevent digital clipping
 
 
 @dataclass

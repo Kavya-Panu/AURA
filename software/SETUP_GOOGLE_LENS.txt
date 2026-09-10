@@ -1,0 +1,61 @@
+AURA GOOGLE LENS-STYLE IMAGE SEARCH
+===================================
+
+The AURA software is ready. Google Cloud credentials are required before the
+online image match can activate. Until then, AURA automatically keeps using its
+previous local MediaPipe detector.
+
+ONE-TIME GOOGLE CLOUD SETUP
+---------------------------
+1. Open https://console.cloud.google.com/
+2. Create or select a Google Cloud project.
+3. Confirm billing for that project. Google currently makes the first 1,000
+   Cloud Vision feature requests per month free, but Google still requires a
+   billing-enabled project.
+4. Open "APIs & Services" > "Library".
+5. Search for "Cloud Vision API" and enable it.
+6. Open "IAM & Admin" > "Service Accounts".
+7. Create a service account named "aura-vision".
+8. Open that service account, select "Keys", choose "Add key" >
+   "Create new key" > "JSON", and download the JSON file.
+
+CONNECT THE FILE TO AURA
+------------------------
+1. Create this folder if it does not already exist:
+   C:\Users\kavya\OneDrive\Documents\AURA_Software\software\secrets
+
+2. Move the downloaded JSON file into that folder and rename it:
+   google-vision-service-account.json
+
+3. Open aura_settings.json and change:
+   "google_vision_credentials": ""
+
+   to:
+   "google_vision_credentials": "secrets/google-vision-service-account.json"
+
+4. Restart AURA with START_AURA_BRAIN.bat.
+
+EXPECTED STARTUP MESSAGE
+------------------------
+Google Lens-style web search: READY
+
+HOW TO USE IT
+-------------
+Say:
+  "Hey AURA, what is this?"
+  "Hey AURA, what am I holding?"
+  "Hey AURA, identify this object."
+
+Or type:
+  /lens
+
+PRIVACY
+-------
+Only the single camera frame captured for a visual question is sent to Google.
+Normal face tracking, wake-word listening, and voice questions do not upload
+camera images. Do not commit or share the service-account JSON file.
+
+ROLLBACK
+--------
+The stable files from before this feature are saved in:
+checkpoints\stable_before_google_lens_20260901

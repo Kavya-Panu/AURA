@@ -62,7 +62,7 @@ class BrainConfig:
     def default() -> "BrainConfig":
         """A sensible default wiring for the five named providers + fallback."""
         providers = [
-            ProviderConfig("ollama", "qwen2.5:7b", priority=10, is_local=True),
+            ProviderConfig("ollama", "qwen3.5:4b", priority=10, is_local=True),
             ProviderConfig("qwen", "qwen-max", priority=40),
             ProviderConfig("deepseek", "deepseek-chat", priority=50),
             ProviderConfig("openai", "gpt-4o", priority=60),

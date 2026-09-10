@@ -1,0 +1,71 @@
+AURA SIRI-STYLE VOICE UPGRADE
+================================
+
+WHAT CHANGED
+------------
+- More accurate Whisper small.en model with beam search.
+- One-second ambient-noise calibration before the first listening turn.
+- Adaptive end-of-speech timing instead of stopping after 0.7 seconds.
+- Short questions get up to 1.8 seconds of silence before AURA stops recording.
+- Normal questions use 1.25 seconds; long questions allow 1.55 seconds.
+- Up to 30 seconds for a spoken question.
+- 500 ms pre-roll protects quiet first words.
+- Conversation mode listens again after AURA finishes speaking.
+- Wake-word-style mode ignores speech unless it contains "AURA".
+
+INSTALL ONCE
+------------
+1. Close Arduino Serial Monitor.
+2. Double-click INSTALL_VOICE.bat.
+3. Wait for installation to finish.
+4. The first launch downloads the small.en Whisper model. This can take time.
+
+NORMAL MODE
+-----------
+Double-click START_AURA_VOICE.bat.
+At the prompt, press Enter, speak naturally, then pause.
+
+CONVERSATION MODE (recommended)
+-------------------------------
+Double-click START_AURA_CONVERSATION.bat.
+AURA listens, answers, waits until its own voice finishes, and listens again.
+Say "AURA stop listening" to return to the typed prompt.
+
+You can also enter conversation mode by typing:
+  /conversation
+
+WAKE-WORD-STYLE MODE
+--------------------
+Double-click START_AURA_WAKE.bat.
+Say the name and request in one sentence, for example:
+  Hey AURA, explain Ohm's law.
+
+Speech without AURA's name is ignored. Say:
+  AURA stop listening
+to return to the typed prompt.
+
+This mode uses Whisper to recognize the name; it is a wake-word-style loop,
+not a low-power hardware wake-word detector.
+
+USEFUL COMMANDS
+---------------
+  /listen          one spoken question
+  /conversation    enter hands-free follow-up mode
+  /wake            enter AURA-gated listening mode
+  /calibrate       recalibrate on the next listening turn
+  /mics            list microphones
+  /say hello       test the laptop voice
+  /stop            stop AURA speaking
+  /quit            close AURA
+
+IF RECOGNITION IS STILL POOR
+----------------------------
+1. Type /mics and note the best microphone number.
+2. Put that number in aura_settings.json as microphone_index.
+3. Type /calibrate, then stay quiet during the calibration message.
+4. Keep the microphone 30-60 cm away and reduce fan/background music.
+
+SPEED OPTION
+------------
+small.en is more accurate than base.en but takes longer to load. If your laptop
+is too slow, change whisper_model in aura_settings.json back to base.en.

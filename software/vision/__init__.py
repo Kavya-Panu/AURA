@@ -22,6 +22,14 @@ from .vision_result import (
     DetectionKind,
     VisionResult,
 )
+from .face_recognizer import FaceRecognition, SFaceRecognizer
+from .object_vision import ObjectObservation, ObjectVisionService, VisualAnswer
+from .google_lens import GoogleLensService, LensResult, LensSource
+from .focus_distraction import (
+    DistractionTracker,
+    FocusDistractionConfig,
+    FocusDistractionMonitor,
+)
 
 __all__ = [
     "VisionManager",
@@ -35,4 +43,15 @@ __all__ = [
     "Detection",
     "DetectionKind",
     "BoundingBox",
+    "FaceRecognition",
+    "SFaceRecognizer",
+    "ObjectObservation",
+    "ObjectVisionService",
+    "VisualAnswer",
+    "GoogleLensService",
+    "LensResult",
+    "LensSource",
+    "DistractionTracker",
+    "FocusDistractionConfig",
+    "FocusDistractionMonitor",
 ]

@@ -21,6 +21,8 @@ from .brain_context import BrainContext, BrainSnapshot
 from .brain_manager import BrainManager
 from .brain_result import BrainResult, TokenUsage
 from .knowledge_service import KnowledgeRequest
+from .weather_service import WeatherAnswer, WeatherService
+from .web_search_service import WebResult, WebSearchAnswer, WebSearchService
 from .provider_registry import (
     AIProvider, GenerationRequest, MockProvider, ProviderRegistry,
 )
@@ -29,5 +31,6 @@ __all__ = [
     "BrainManager", "BrainConfig", "ProviderConfig", "SelectionRules",
     "TaskKind", "BrainResult", "TokenUsage", "BrainContext", "BrainSnapshot",
     "AIProvider", "GenerationRequest", "MockProvider", "ProviderRegistry",
-    "KnowledgeRequest",
+    "KnowledgeRequest", "WeatherAnswer", "WeatherService", "WebResult",
+    "WebSearchAnswer", "WebSearchService",
 ]

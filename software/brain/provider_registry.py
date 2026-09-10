@@ -191,12 +191,37 @@ class DeepSeekProvider(_LazyClientProvider):
 class OllamaProvider(_LazyClientProvider):
     def _build_client(self):
         import ollama                                    # import now -> unavailable if missing
+
         def client(req: GenerationRequest):
             msgs = [{"role": "system", "content": req.system_prompt}, *req.messages]
-            resp = ollama.chat(model=self._cfg.model, messages=msgs,
-                               options={"temperature": req.temperature})
+
+            # Fast robot-conversation profile:
+            # - think=False prevents Qwen3 from spending time on hidden reasoning
+            #   for ordinary desk-companion questions.
+            # - num_predict makes the existing max_tokens setting effective.
+            # - num_ctx=2048 reduces KV-cache VRAM use, helping an 8B model fit
+            #   more completely on a 6 GB laptop GPU.
+            # - keep_alive=-1 keeps the model resident between questions.
+            resp = ollama.chat(
+                model=self._cfg.model,
+                messages=msgs,
+                stream=False,
+                think=False,
+                keep_alive=-1,
+                options={
+                    "temperature": req.temperature,
+                    "num_predict": min(req.max_tokens, 160),
+                    "num_ctx": 2048,
+                },
+            )
+
             text = resp["message"]["content"]
-            return text, resp.get("prompt_eval_count", 0), resp.get("eval_count", 0)
+            return (
+                text,
+                resp.get("prompt_eval_count", 0),
+                resp.get("eval_count", 0),
+            )
+
         return client
 
 

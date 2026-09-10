@@ -1,39 +1,43 @@
-# Python
+# Python and local environments
 __pycache__/
 *.py[cod]
 *.pyo
-
-# Virtual environments
 venv/
 .venv/
 
-# IDE
+# IDE and operating-system files
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Testing
+# Tests and build output
 .pytest_cache/
 .coverage
 htmlcov/
-
-# Build
 dist/
 build/
 *.egg-info/
+firmware/build/
 
-# Logs
-*.log
-
-# Environment
+# Local runtime state and credentials
+software/data/
+software/logs/
+software/secrets/
+software/outputs/
+software/checkpoints/
+software/.cache/
 .env
+*.log
+*.db
+*.sqlite
+*.sqlite3
 
-# Models
-models/
-weights/
-
-# Temporary
-temp/
+# Private recordings and exported media
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.mp4
+*.avi

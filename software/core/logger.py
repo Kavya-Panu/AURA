@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import atexit
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -31,13 +32,40 @@ _DATEFMT = "%H:%M:%S"
 _configured = False
 
 
+def shutdown_logging() -> None:
+    """Flush and close every AURA handler.
+
+    This is especially important on Windows, where an open rotating log file
+    cannot be moved, deleted, or replaced by maintenance tools and tests.
+    Calling this more than once is safe.
+    """
+    global _configured
+    root = logging.getLogger(_ROOT_NAME)
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+        try:
+            handler.flush()
+        finally:
+            handler.close()
+    _configured = False
+
+
 def configure_logging(cfg: LoggingConfig) -> None:
     """Configure the root AURA logger. Safe to call more than once
     (subsequent calls reconfigure handlers instead of duplicating them)."""
     global _configured
     root = logging.getLogger(_ROOT_NAME)
     root.setLevel(logging.DEBUG)          # handlers filter, root stays open
-    root.handlers.clear()
+    # Removing a FileHandler from ``root.handlers`` does not close its file.
+    # On Windows that leaves aura.log locked, which breaks reconfiguration,
+    # log rotation and temporary-directory cleanup.  Explicitly flush and
+    # close every previous handler before installing the new configuration.
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+        try:
+            handler.flush()
+        finally:
+            handler.close()
     root.propagate = False
 
     formatter = logging.Formatter(_FORMAT, datefmt=_DATEFMT)
@@ -83,3 +111,6 @@ def set_debug(enabled: bool) -> None:
             handler, RotatingFileHandler
         ):
             handler.setLevel(logging.DEBUG if enabled else logging.INFO)
+
+
+atexit.register(shutdown_logging)

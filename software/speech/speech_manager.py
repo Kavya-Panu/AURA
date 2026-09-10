@@ -75,6 +75,10 @@ class SpeechManager:
         self._worker: threading.Thread | None = None
         self._current_profile = config.default_profile
         self._sub_id: int | None = None
+        self._answers_enabled = threading.Event()
+        self._answers_enabled.set()
+        self._suppressed_request_ids: set[str] = set()
+        self._suppressed_lock = threading.RLock()
 
     # =====================================================================
     #  Module protocol
@@ -134,8 +138,14 @@ class SpeechManager:
         self._ctx.set_queue_length(len(self._queue))
         return ok
 
-    def cancel_all(self) -> int:
-        """Cancel the current utterance and clear the queue."""
+    def cancel_all(self, *, suppress_answers: bool = False) -> int:
+        """Cancel the current utterance and clear the queue.
+
+        ``suppress_answers`` also ignores a late brain result from the
+        interaction being cancelled by a spoken barge-in command.
+        """
+        if suppress_answers:
+            self._answers_enabled.clear()
         self._ctx.set_state(SpeechState.CANCELLING)
         self._player.stop()
         self._mouth.stop()
@@ -144,6 +154,21 @@ class SpeechManager:
         self._bus.emit(ev.SPEECH_CANCELLED, {"cleared": removed}, source=self.name)
         self._ctx.set_state(SpeechState.IDLE)
         return removed
+
+    def allow_answers(self) -> None:
+        """Allow the next brain result to enter the speech queue."""
+        self._answers_enabled.set()
+
+    def suppress_answers(self) -> None:
+        """Ignore brain results until a new user question begins."""
+        self._answers_enabled.clear()
+
+    def suppress_request(self, request_id: str) -> None:
+        """Prevent one cancelled brain request from being spoken later."""
+        if not request_id:
+            return
+        with self._suppressed_lock:
+            self._suppressed_request_ids.add(request_id)
 
     def set_volume(self, volume: float) -> None:
         self._player.set_volume(volume)
@@ -238,6 +263,17 @@ class SpeechManager:
     #  Bus integration: speak Brain answers
     # =====================================================================
     def _on_answer(self, event: Event) -> None:
+        if not self._answers_enabled.is_set():
+            log.info("discarding speech for a cancelled interaction")
+            return
+        request_id = str(event.data.get("request_id") or "")
+        if request_id:
+            with self._suppressed_lock:
+                if request_id in self._suppressed_request_ids:
+                    self._suppressed_request_ids.discard(request_id)
+                    log.info("discarding speech for cancelled request %s",
+                             request_id)
+                    return
         text = event.data.get("text", "")
         if not text or not event.data.get("success", True):
             return

@@ -116,6 +116,8 @@ class PySerialTransport:
 
     def __init__(self) -> None:
         self._serial = None
+        self._rx_buffer = bytearray()
+        self._discard_rx_line = False
 
     def open(self, port: str, baud: int, read_timeout_s: float,
              write_timeout_s: float) -> None:
@@ -124,6 +126,8 @@ class PySerialTransport:
         except Exception as exc:                        # noqa: BLE001
             raise SerialError(f"pyserial not available: {exc}") from exc
         try:
+            self._rx_buffer.clear()
+            self._discard_rx_line = False
             self._serial = serial.Serial(
                 port=port, baudrate=baud, timeout=read_timeout_s,
                 write_timeout=write_timeout_s)
@@ -136,6 +140,8 @@ class PySerialTransport:
                 self._serial.close()
             finally:
                 self._serial = None
+                self._rx_buffer.clear()
+                self._discard_rx_line = False
 
     def is_open(self) -> bool:
         return self._serial is not None and self._serial.is_open
@@ -152,7 +158,27 @@ class PySerialTransport:
         if self._serial is None:
             return None
         try:
-            raw = self._serial.readline()
+            if b"\n" not in self._rx_buffer:
+                # Read USB packets in batches. pyserial.readline() reads one
+                # byte at a time and may return a partial line on timeout;
+                # treating that fragment as a complete MIC packet loses audio.
+                waiting = self._serial.in_waiting
+                raw = self._serial.read(max(1, min(waiting, 4096)))
+                if self._discard_rx_line:
+                    newline = raw.find(b"\n")
+                    if newline < 0:
+                        return None
+                    raw = raw[newline + 1:]
+                    self._discard_rx_line = False
+                self._rx_buffer.extend(raw)
+            newline = self._rx_buffer.find(b"\n")
+            if newline < 0:
+                if len(self._rx_buffer) > 16384:
+                    self._rx_buffer.clear()
+                    self._discard_rx_line = True
+                return None
+            raw = bytes(self._rx_buffer[:newline])
+            del self._rx_buffer[:newline + 1]
         except Exception as exc:                        # noqa: BLE001
             raise SerialError(f"read failed: {exc}") from exc
         if not raw:
@@ -181,7 +207,7 @@ class SerialManager:
 
     def __init__(self, event_bus: EventBus, config: SerialConfig,
                  transport: SerialTransport,
-                 on_line: Callable[[str], None] | None = None,
+                 on_line: Callable[[str], bool | None] | None = None,
                  queue_max: int = 256,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._bus = event_bus
@@ -202,6 +228,15 @@ class SerialManager:
         self._writer: threading.Thread | None = None
         self._reader: threading.Thread | None = None
         self._port: str | None = None
+        # Keeps large real-time audio writes and ordinary command writes from
+        # interleaving on the same UART.
+        self._io_write_lock = threading.RLock()
+        # Microphone and speaker handshakes must briefly own the serial link.
+        # Otherwise queued gaze/emotion commands can surround SPK BEGIN or
+        # MIC START and delay the matching firmware reply long enough for the
+        # audio operation to time out.
+        self._queued_writes_paused = threading.Event()
+        self._audio_priority_allowed = threading.Event()
 
     # ------------------------------------------------------------- state
     @property
@@ -283,6 +318,20 @@ class SerialManager:
              priority: CommandPriority = CommandPriority.NORMAL) -> bool:
         """Queue a command line. Returns False if the queue is full."""
         with self._queue_cv:
+            # Camera targets can change throughout a long wake-listening
+            # session. Only the latest target matters when audio releases the
+            # queue; replaying hundreds of old gaze/head positions causes lag.
+            key = self._target_key(line)
+            # Head tracking must continue during the long wake-microphone
+            # stream. Promote only this coalesced target, not all camera
+            # traffic. The audio handshake gate still blocks every queued
+            # command until it is safe to interleave complete lines.
+            if key == "head":
+                priority = min(priority, CommandPriority.HIGH)
+            if key:
+                self._heap = [item for item in self._heap
+                              if self._target_key(item.line) != key]
+                heapq.heapify(self._heap)
             if len(self._heap) >= self._queue_max:
                 return False
             heapq.heappush(self._heap,
@@ -290,23 +339,100 @@ class SerialManager:
             self._queue_cv.notify()
             return True
 
+    @staticmethod
+    def _target_key(line: str) -> str:
+        if line.startswith(("GAZE ", "LOOK ")):
+            return "gaze"
+        if line.startswith("SERVO:HEAD:"):
+            return "head"
+        if line.startswith("MUSIC LEVEL "):
+            return "music_level"
+        return ""
+
+    def send_immediate(self, line: str) -> bool:
+        """Write one line synchronously.
+
+        Audio frames use this path so their order cannot be changed by command
+        priorities. Normal face/control commands should continue using send().
+        """
+        try:
+            if not self._transport.is_open():
+                raise NotConnected("serial not open")
+            with self._io_write_lock:
+                self._transport.write_line(line)
+            return True
+        except (SerialError, NotConnected) as exc:
+            log.warning("immediate write failed (%s)", exc)
+            self._handle_disconnect()
+            return False
+
+    def pause_queued_writes(self) -> None:
+        """Pause ordinary queued commands while real-time audio owns UART.
+
+        Immediate audio writes intentionally bypass this gate.  Taking and
+        releasing the write lock after setting the flag also waits for any
+        ordinary command that was already being written to finish.
+        """
+        self._queued_writes_paused.set()
+        self._audio_priority_allowed.clear()
+        with self._io_write_lock:
+            pass
+
+    def resume_queued_writes(self) -> None:
+        """Allow queued face, servo and heartbeat commands to continue."""
+        self._queued_writes_paused.clear()
+        self._audio_priority_allowed.clear()
+        with self._queue_cv:
+            self._queue_cv.notify_all()
+
+    def resume_priority_commands(self) -> None:
+        """After an audio handshake, allow sparse scene/emotion updates.
+
+        LOW/NORMAL gaze and heartbeat traffic stays queued. HIGH/CRITICAL
+        updates, including coalesced head targets and TIMER STOP, must not
+        wait for the next wake phrase.
+        The write lock still keeps each command and PCM packet intact.
+        """
+        self._audio_priority_allowed.set()
+        with self._queue_cv:
+            self._queue_cv.notify_all()
+
+    def _command_blocked(self, command: _QueuedCommand) -> bool:
+        return self._queued_writes_paused.is_set() and (
+            not self._audio_priority_allowed.is_set()
+            or command.priority > int(CommandPriority.HIGH)
+        )
+
     def _writer_loop(self) -> None:
         while self._running.is_set():
             with self._queue_cv:
-                while self._running.is_set() and not self._heap:
+                while self._running.is_set() and (
+                    not self._heap or self._command_blocked(self._heap[0])
+                ):
                     self._queue_cv.wait(timeout=0.2)
                 if not self._running.is_set():
                     break
                 cmd = heapq.heappop(self._heap) if self._heap else None
             if cmd is None:
                 continue
-            self._write_with_recovery(cmd.line)
+            # If an audio handshake began after popping this command, put it
+            # back. Waiting on a popped LOW command would block later HIGH
+            # commands even when they are allowed during the audio stream.
+            with self._io_write_lock:
+                if self._command_blocked(cmd):
+                    with self._queue_cv:
+                        heapq.heappush(self._heap, cmd)
+                    continue
+                if not self._running.is_set():
+                    break
+                self._write_with_recovery(cmd.line)
 
     def _write_with_recovery(self, line: str) -> None:
         try:
             if not self._transport.is_open():
                 raise NotConnected("serial not open")
-            self._transport.write_line(line)
+            with self._io_write_lock:
+                self._transport.write_line(line)
             self._bus.emit(ev.COMMAND_SENT, {"line": line},
                            source="hardware.serial")
             if self._cfg and getattr(self._cfg, "port", None) is not None:
@@ -330,13 +456,17 @@ class SerialManager:
                     continue
                 time.sleep(0.005)
                 continue
-            self._bus.emit(ev.COMMAND_RECEIVED, {"line": line},
-                           source="hardware.serial")
+            consumed = False
             if self._on_line is not None:
                 try:
-                    self._on_line(line)
+                    consumed = bool(self._on_line(line))
                 except Exception:                       # noqa: BLE001
                     log.exception("on_line handler failed")
+            # PCM lines arrive 50 times per second. They are routed directly to
+            # the audio queue instead of flooding the global EventBus/logs.
+            if not consumed:
+                self._bus.emit(ev.COMMAND_RECEIVED, {"line": line},
+                               source="hardware.serial")
 
     # -------------------------------------------------------- reconnect
     def _handle_disconnect(self) -> None:

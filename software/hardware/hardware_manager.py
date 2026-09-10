@@ -33,6 +33,8 @@ from .device_types import (
     CommandPriority, ConnectionState, DeviceType, HealthState)
 from .hardware_config import HardwareConfig
 from .hardware_exceptions import DeviceNotFound, HardwareError
+from .esp32_protocol import emotion_command
+from .esp32_audio import Esp32AudioLink
 from .serial_manager import SerialManager, SerialTransport
 
 log = get_logger("hardware.manager")
@@ -59,6 +61,7 @@ class HardwareManager:
             event_bus, config.serial, transport,
             on_line=self._on_serial_line, queue_max=config.queue.max_size,
             clock=clock)
+        self._audio = Esp32AudioLink(self._serial)
 
         self._running = threading.Event()
         self._health_thread: threading.Thread | None = None
@@ -164,6 +167,11 @@ class HardwareManager:
     def available_ports(self) -> list[str]:
         return self._serial.list_ports()
 
+    @property
+    def audio_link(self) -> Esp32AudioLink:
+        """Onboard ES8311 microphone/speaker link."""
+        return self._audio
+
     # =====================================================================
     #  Commands (the single hardware entry point for other modules)
     # =====================================================================
@@ -181,9 +189,20 @@ class HardwareManager:
             raise
 
     def set_emotion(self, emotion_token: str) -> None:
-        """Send an emotion token to the ESP32 face (convenience wrapper)."""
-        self.send_command(_FACE_DEVICE, emotion_token,
-                          priority=CommandPriority.HIGH)
+        """Send a normalized emotion command to the ESP32 face."""
+        self.send_command(
+            _FACE_DEVICE,
+            emotion_command(emotion_token),
+            priority=CommandPriority.HIGH,
+        )
+
+    def send_face_command(self, command: str, *,
+                          priority: CommandPriority = CommandPriority.NORMAL) -> None:
+        """Send a validated/raw command to the ESP32 face device."""
+        line = str(command).strip()
+        if not line:
+            raise ValueError("face command cannot be empty")
+        self.send_command(_FACE_DEVICE, line, priority=priority)
 
     # =====================================================================
     #  Bus integration: forward EMOTION_CHANGED to the ESP32 face
@@ -197,24 +216,34 @@ class HardwareManager:
             return
         try:
             if "emotion" in data:
-                face.send_command(str(data["emotion"]), CommandPriority.HIGH)
+                face.send_command(
+                    emotion_command(str(data["emotion"])),
+                    CommandPriority.HIGH,
+                )
             elif "mouth" in data:
-                face.send_command(f"MOUTH:{data['mouth']}", CommandPriority.NORMAL)
+                # Current ESP32 firmware has no MOUTH:* parser. Keep the event
+                # available to the Speech layer but do not send an invalid line.
+                log.debug("mouth event ignored until firmware visemes are added: %s",
+                          data["mouth"])
         except HardwareError as exc:
             self._bus.emit(ev.DEVICE_ERROR,
                            {"device": _FACE_DEVICE, "error": str(exc)},
                            source=self.name)
 
-    def _on_serial_line(self, line: str) -> None:
+    def _on_serial_line(self, line: str) -> bool:
         """Handle an inbound line from the ESP32 (telemetry/acks). Battery
         telemetry of the form 'BATTERY:<pct>' updates the battery device and may
         raise BATTERY_LOW."""
+        if self._audio.handle_line(line):
+            return True
         if line.startswith("BATTERY:"):
             try:
                 pct = float(line.split(":", 1)[1])
             except ValueError:
-                return
+                return True
             self._update_battery(pct)
+            return True
+        return False
 
     # =====================================================================
     #  Heartbeat / health monitoring
@@ -232,8 +261,9 @@ class HardwareManager:
 
     def _run_health_check(self) -> None:
         # heartbeat to the ESP32 (best-effort; failure triggers reconnect inside
-        # the SerialManager)
-        if self._serial.connected:
+        # the SerialManager). Real-time PCM shares this link, so never insert a
+        # PING in the middle of microphone or speaker frames.
+        if self._serial.connected and not self._audio.busy:
             self._serial.send(self._cfg.health.heartbeat_command,
                               CommandPriority.LOW)
         # poll device health; emit DEVICE_ERROR for any that faulted

@@ -37,12 +37,15 @@ from .brain_exceptions import (
     ProviderError, ProviderUnavailable,
 )
 from .brain_result import BrainResult
+from .aura_identity import AURA_SYSTEM_OVERVIEW, is_aura_identity_question
 from .conversation_manager import ConversationManager
 from .knowledge_service import KnowledgeRequest, KnowledgeService
 from .prompt_manager import PromptManager
 from .provider_registry import GenerationRequest, ProviderRegistry
 from .provider_selector import ProviderSelector
 from .translation_service import TranslationRequest, TranslationService
+from .weather_service import WeatherService
+from .web_search_service import WebSearchService
 
 log = get_logger("brain.manager")
 
@@ -56,6 +59,8 @@ class BrainManager:
                  registry: ProviderRegistry | None = None,
                  prompt_manager: PromptManager | None = None,
                  conversation_manager: ConversationManager | None = None,
+                 weather_service: WeatherService | None = None,
+                 web_search_service: WebSearchService | None = None,
                  max_workers: int = 4,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._bus = event_bus
@@ -67,6 +72,8 @@ class BrainManager:
             self._cfg.max_history_turns)
         self._knowledge = KnowledgeService()
         self._translation = TranslationService(self._run_generation)
+        self._weather = weather_service
+        self._web_search = web_search_service
         self._ctx = BrainContext()
         self._clock = clock
 
@@ -138,7 +145,131 @@ class BrainManager:
         """Answer a question, using conversation history + the mode's prompt."""
         conversation = self._conversations.get(session_id)
         conversation.set_mode(mode)
+        previous_messages = tuple(conversation.messages())
         conversation.add_user(question)
+
+        if is_aura_identity_question(question):
+            # Use verified project facts instead of allowing an LLM to invent
+            # capabilities.  This path is also instant and works offline.
+            conversation.add_assistant(AURA_SYSTEM_OVERVIEW)
+            return BrainResult(
+                response=AURA_SYSTEM_OVERVIEW,
+                provider="aura-system",
+                confidence=1.0,
+                processing_time=0.0,
+                metadata={"task": "self_description", "local": True},
+            )
+
+        weather_question = bool(
+            self._weather and self._weather.is_current_weather_question(question)
+        )
+        if (
+            self._weather
+            and not weather_question
+            and self._weather.is_location_fragment(question)
+            and any(
+                message.get("role") == "assistant"
+                and message.get("content", "").startswith(("Right now in ", "It is ", "Yes, ", "No, "))
+                for message in previous_messages[-2:]
+            )
+        ):
+            # Wake-word audio can occasionally clip the beginning of a phrase,
+            # leaving only "of Manchester". Recover it when the immediately
+            # preceding exchange was already about weather.
+            weather_question = True
+
+        if self._weather and weather_question:
+            # Current conditions must come from a live data source, never from
+            # the language model's training data.
+            started = self._clock()
+            self._ctx.record_request()
+            self._bus.emit(ev.BRAIN_REQUESTED, {"task": "weather"}, source=self.name)
+            self._bus.emit(
+                ev.BRAIN_STARTED,
+                {"task": "weather", "chain": ["open-meteo"]},
+                source=self.name,
+            )
+            weather = self._weather.current(question)
+            elapsed = self._clock() - started
+            conversation.add_assistant(weather.text)
+            self._bus.emit(
+                ev.BRAIN_COMPLETED,
+                {"provider": "open-meteo", "task": "weather", "tokens": 0},
+                source=self.name,
+            )
+            return BrainResult(
+                response=weather.text,
+                provider="open-meteo",
+                confidence=1.0 if weather.success else 0.35,
+                processing_time=elapsed,
+                success=True,
+                metadata={
+                    "task": "weather",
+                    "location": weather.location,
+                    "live": weather.success,
+                    "error": weather.error,
+                },
+            )
+
+        web_search_question = bool(
+            self._web_search and self._web_search.needs_search(question)
+        )
+        if self._web_search and web_search_question:
+            search_answer = self._web_search.search(question)
+            if not search_answer.success:
+                text = (
+                    "Sorry, I could not reach internet search right now, so I "
+                    "cannot verify that current information."
+                )
+                conversation.add_assistant(text)
+                return BrainResult(
+                    response=text,
+                    provider="web-search",
+                    confidence=0.25,
+                    processing_time=0.0,
+                    metadata={
+                        "task": "web_search",
+                        "live": False,
+                        "query": search_answer.query,
+                        "error": search_answer.error,
+                        "sources": [],
+                    },
+                )
+
+            system_prompt = (
+                self._prompts.get_prompt(mode)
+                + "\n\n"
+                + self._web_search.build_context(search_answer)
+            )
+            resolved_task = task or self._infer_task(question, mode)
+            sources = [result.to_dict() for result in search_answer.results]
+            gen = GenerationRequest(
+                system_prompt=system_prompt,
+                messages=tuple(conversation.messages()),
+                temperature=0.2,
+                max_tokens=100,
+                metadata={
+                    "mode": mode,
+                    "session": session_id,
+                    "web_search": True,
+                    "disable_cache": True,
+                },
+            )
+            result = self._run_generation(
+                gen,
+                resolved_task,
+                timeout_s=timeout_s,
+            )
+            result = _with_meta(
+                result,
+                task="web_search",
+                live=True,
+                query=search_answer.query,
+                sources=sources,
+            )
+            if result.success:
+                conversation.add_assistant(result.response)
+            return result
 
         system_prompt = self._prompts.get_prompt(mode)
         resolved_task = task or self._infer_task(question, mode)
@@ -146,7 +277,7 @@ class BrainManager:
             system_prompt=system_prompt,
             messages=tuple(conversation.messages()),
             temperature=self._cfg.default_temperature,
-            max_tokens=1024,
+            max_tokens=(180 if str(mode).upper() in {"TEACHER", "PRESENTATION"} else 80),
             metadata={"mode": mode, "session": session_id})
 
         result = self._run_generation(gen, resolved_task, timeout_s=timeout_s)
@@ -195,8 +326,9 @@ class BrainManager:
         self._ctx.record_request()
         self._bus.emit(ev.BRAIN_REQUESTED, {"task": task.value}, source=self.name)
 
+        cache_allowed = not bool((gen.metadata or {}).get("disable_cache"))
         cache_key = self._cache_key(gen, task)
-        cached = self._cache_get(cache_key)
+        cached = self._cache_get(cache_key) if cache_allowed else None
         if cached is not None:
             return _with_meta(cached, cache_hit=True)
 
@@ -217,7 +349,8 @@ class BrainManager:
             result = self._try_provider(provider, gen, timeout)
             if result is not None and result.success:
                 self._announce_provider(name)
-                self._cache_put(cache_key, result)
+                if cache_allowed:
+                    self._cache_put(cache_key, result)
                 self._bus.emit(ev.BRAIN_COMPLETED,
                                {"provider": name, "task": task.value,
                                 "tokens": result.tokens.total}, source=self.name)
@@ -275,13 +408,18 @@ class BrainManager:
         question = event.data.get("text") or event.data.get("question", "")
         mode = event.data.get("mode")
         session = event.data.get("session", ConversationManager.DEFAULT_SESSION)
+        request_id = event.data.get("request_id")
         if not question:
             return
         result = self.ask(question, mode=mode, session_id=session)
         self._bus.emit(ev.ANSWER_READY,
                        {"text": result.response, "provider": result.provider,
                         "success": result.success,
-                        "confidence": round(result.confidence, 3)},
+                        "confidence": round(result.confidence, 3),
+                        "processing_time": round(result.processing_time, 2),
+                        "mode": mode,
+                        "request_id": request_id,
+                        "metadata": result.metadata},
                        source=self.name)
 
     # =====================================================================

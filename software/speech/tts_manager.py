@@ -94,10 +94,18 @@ class Pyttsx3Engine:
         try:
             import pyttsx3
             import tempfile
+
             eng = pyttsx3.init()
             eng.setProperty("rate", int(180 * profile.speed))
             eng.setProperty("volume", profile.volume)
-            path = tempfile.mktemp(suffix=".wav")
+
+            temp = tempfile.NamedTemporaryFile(
+                suffix=".wav",
+                delete=False,
+            )
+            path = temp.name
+            temp.close()
+
             eng.save_to_file(text, path)
             eng.runAndWait()
             return SynthesisResult(audio=path, duration_s=_estimate(text, profile),

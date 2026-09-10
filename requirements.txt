@@ -1,18 +1,1 @@
-numpy
-opencv-python
-mediapipe
-ultralytics
-faster-whisper
-sounddevice
-soundfile
-pyserial
-pyttsx3
-openai
-python-dotenv
-pydantic
-PyYAML
-requests
-psutil
-
-pytest
-pytest-cov
+-r software/requirements_brain.txt

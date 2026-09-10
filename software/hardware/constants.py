@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from enum import Enum, auto
 
-VERSION: str = "0.1.0"
+VERSION: str = "0.2.0"
 ROBOT_NAME: str = "AURA"
 
 
@@ -196,14 +196,14 @@ class Emotion(Enum):
 
 class FaceCommand(Enum):
     """Non-emotion commands understood by the ESP32 face engine."""
-    FOCUS_START = "FOCUS_START"
-    FOCUS_DONE = "FOCUS_DONE"
-    FOCUS_STOP = "FOCUS_STOP"
+    FOCUS_START = "BOOK START"
+    FOCUS_DONE = "BOOK STOP"
+    FOCUS_STOP = "BOOK STOP"
     PROGRESS = "PROGRESS"          # "PROGRESS 0.42"
     TALK_ON = "TALK_ON"
     TALK_OFF = "TALK_OFF"
-    GAZE = "GAZE"                  # "GAZE 0.30 -0.10"
-    CENTER = "CENTER"
+    GAZE = "LOOK"                  # "LOOK LEFT/RIGHT/UP/DOWN/CENTER"
+    CENTER = "LOOK CENTER"
     BLINK = "BLINK"
     WINK = "WINK"
     SLEEP = "SLEEP"
