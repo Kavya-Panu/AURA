@@ -19,6 +19,41 @@ runtime logs or previous firmware backups. The included `aura_settings.json` is 
 safe example configuration. Set your own serial port and optional service settings
 locally before running AURA.
 
+## Project gallery
+
+These images show the assembled prototype, its expressions, timer display, internal
+hardware, CAD work and live software demonstrations.
+
+### Physical prototype
+
+<p align="center">
+  <img src="docs/images/aura-smile-front.jpeg" alt="AURA showing a smile" width="30%">
+  <img src="docs/images/aura-idle-front.jpeg" alt="AURA assembled prototype" width="30%">
+  <img src="docs/images/aura-love-expression.jpeg" alt="AURA love expression" width="30%">
+</p>
+<p align="center">
+  <img src="docs/images/aura-angry-expression.jpeg" alt="AURA angry expression" width="30%">
+  <img src="docs/images/aura-timer-countdown.jpeg" alt="AURA timer countdown" width="30%">
+  <img src="docs/images/aura-timer-alert.jpeg" alt="AURA timer alert" width="30%">
+</p>
+
+### Design and implementation
+
+<p align="center">
+  <img src="docs/images/aura-cad-head.png" alt="Fusion 360 head design" width="46%">
+  <img src="docs/images/aura-cad-body.png" alt="Fusion 360 body design" width="46%">
+</p>
+<p align="center">
+  <img src="docs/images/aura-internal-hardware.jpeg" alt="AURA internal wiring and electronics" width="46%">
+  <img src="docs/images/aura-startup-log.png" alt="AURA startup and subsystem log" width="46%">
+</p>
+
+### Feature demonstration
+
+<p align="center">
+  <img src="docs/images/aura-weather-demo.png" alt="AURA weather response demonstration" width="70%">
+</p>
+
 ## Laptop setup
 
 From the repository folder:
